@@ -1,17 +1,20 @@
 import torch
 import torch.nn as nn
 
-policy_net = nn.Sequential(nn.Linear(4, 1), nn.Sigmoid())
+policy_net = nn.Sequential(nn.Linear(4, 1), nn.Sigmoid()).double()
 optim = torch.optim.RMSprop(lr=1e-3, params=policy_net.parameters())
 
 
 def update(action, value, expected):
-    observation = torch.Tensor(1, 4)
+    action = action.double()
+    value = value.double()
+    observation = torch.Tensor(1, 4).double()
 
     optim.zero_grad()
     action_prob = policy_net(observation)
-    taken_action_prob = action * action_prob + (1 - action) * (1 - action_prob)
+    taken_action_prob = action * torch.log(action_prob + 1e-12) + (1 - action) * (torch.log(1 - action_prob))
     loss = - taken_action_prob * value
+    loss = loss.sum()
     loss.backward()
     optim.step()
 

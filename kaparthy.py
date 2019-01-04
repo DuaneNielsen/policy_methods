@@ -11,7 +11,7 @@ batch_size = 10  # every how many episodes to do a param update?
 learning_rate = 1e-3
 gamma = 0.99  # discount factor for reward
 decay_rate = 0.99  # decay factor for RMSProp leaky sum of grad^2
-resume = False  # resume from previous checkpoint?
+resume = True  # resume from previous checkpoint?
 render = False
 
 tb = tensorboardX.SummaryWriter('runs/kaparthy4/1e3')
@@ -81,6 +81,7 @@ reward_sum = 0
 episode_number = 0
 game_len = 0
 ave_game_len = []
+debug_buffer = []
 while True:
     if render: env.render()
 
@@ -92,6 +93,9 @@ while True:
     # forward the policy network and sample an action from the returned probability
     aprob, h = policy_forward(x)
     action = 2 if np.random.uniform() < aprob else 3  # roll the dice!
+    debug_buffer.append(aprob)
+    if len(debug_buffer) > 33804:
+        debug_buffer = []
 
     # record various intermediates (needed later for backprop)
     xs.append(x)  # observation

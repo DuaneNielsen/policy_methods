@@ -16,12 +16,13 @@ from multithread import GymWorker
 max_rollout_len = 3000
 downsample_image_size = (100, 80)
 features = downsample_image_size[0] * downsample_image_size[1]
-tb = SummaryWriter(f'runs/rmsprop_1e3_nobatch_multi_0')
+tb = SummaryWriter(f'runs/rmsprop_1e3_nobatch_multi_double_3')
 tb_step = 0
 num_epochs = 600
 num_rollouts = 10
 collected_rollouts = 0
 resume = False
+save = True
 view_games = False
 
 
@@ -61,28 +62,27 @@ class RolloutDataSet(Dataset):
         self.rollout = []
 
     def add_rollout(self, rollout):
+        """Threadsafe method to add rollouts to the dataset"""
         global tb_step
-        self.lock.acquire()
-        for observation, action, reward, done, info in rollout:
-            self.append(observation, reward, action, done)
+        with self.lock:
+            for observation, action, reward, done, info in rollout:
+                self.append(observation, reward, action, done)
 
-            if reward == 0:
-                self.game_length += 1
-            else:
-                self.gl.append(self.game_length)
-                self.reward_total += reward
-                self.game_length = 0
+                if reward == 0:
+                    self.game_length += 1
+                else:
+                    self.gl.append(self.game_length)
+                    self.reward_total += reward
+                    self.game_length = 0
 
-            if done:
-                self.collected_rollouts += 1
-                #hooks.execute_test_end(self.collected_rollouts, num_rollouts, self.reward_total)
-                tb.add_scalar('reward', self.reward_total, tb_step)
-                tb.add_scalar('ave_game_len', statistics.mean(self.gl), tb_step)
-                self.gl = []
-                self.reward_total = 0
-                tb_step += 1
-
-        self.lock.release()
+                if done:
+                    self.collected_rollouts += 1
+                    #hooks.execute_test_end(self.collected_rollouts, num_rollouts, self.reward_total)
+                    tb.add_scalar('reward', self.reward_total, tb_step)
+                    tb.add_scalar('ave_game_len', statistics.mean(self.gl), tb_step)
+                    self.gl = []
+                    self.reward_total = 0
+                    tb_step += 1
 
     def append(self, observation, reward, action, done):
         self.rollout.append((observation, reward, action, done))
@@ -111,7 +111,7 @@ class RolloutDataSet(Dataset):
     def __getitem__(self, item):
         observation, reward, action, done = self.rollout[item]
         value = self.value[item]
-        observation_t = to_tensor(np.expand_dims(observation, axis=2))
+        observation_t = to_tensor(np.expand_dims(observation, axis=2)).double()
         return observation_t, reward, action, value, done
 
     def __len__(self):
@@ -124,7 +124,7 @@ def downsample(observation):
     return greyscale
 
 
-policy_net = PolicyNet(features)
+policy_net = PolicyNet(features).double()
 if resume:
     policy_net.load_state_dict(torch.load('vanilla.wgt'))
 
@@ -157,7 +157,7 @@ for epoch in range(num_epochs):
                 break
             v.render(observation_t)
 
-    if epoch % 20 == 0:
+    if epoch % 20 == 0 and save:
         torch.save(policy_net.state_dict(), 'vanilla.wgt')
 
     policy_net = policy_net.train()
@@ -167,17 +167,19 @@ for epoch in range(num_epochs):
     print('training')
 
     for i, (observation, reward, action, value, done) in enumerate(rollout_loader):
-        action = action.float()
-        value = value.float()
+        action = action.double()
+        value = value.double()
         action[action == 2] = 1.0
         action[action == 3] = 0.0
         optim.zero_grad()
         action_prob = policy_net(observation.squeeze().view(-1, features)).squeeze()
-        prob_action_taken = action * action_prob + (1.0 - action) * (1.0 - action_prob)
+        dp = action - action_prob
+        prob_action_taken = action * torch.log(action_prob + 1e-12) + (1 - action) * (torch.log(1 - action_prob))
+        #prob_action_taken = action * action_prob + (1.0 - action) * (1.0 - action_prob)
         loss = - value * prob_action_taken
         loss = loss.sum()
         loss.backward()
         optim.step()
-        hooks.execute_train_end(i, len(rollout_loader), loss.item())
+        #hooks.execute_train_end(i, len(rollout_loader), loss.item())
 
     #hooks.execute_epoch_end(epoch, num_epochs)

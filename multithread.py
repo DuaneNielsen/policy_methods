@@ -58,7 +58,7 @@ class GymWorker(threading.Thread):
             observation_t0 = observation_t1
             done = False
             while not done:
-                obs_t = to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1, self.features)
+                obs_t = to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1, self.features).double()
                 action_prob = self.policy(obs_t)
                 action = 2 if np.random.uniform() < action_prob.item() else 3
                 observation_t1, reward, done, info = self.env.step(action)
