@@ -2,18 +2,15 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 import gym
-from viewer import UniImageViewer
 import cv2
 import statistics
 from torchvision.transforms.functional import to_tensor
 import numpy as np
 import threading
-#from storm.vis.hooks import hooks
-#from storm.vis import GUIProgressMeter, TB
 from tensorboardX import SummaryWriter
-from multithread import GymWorker
 import cProfile
 import time
+
 
 def do_cprofile(func):
     def profiled_func(*args, **kwargs):
@@ -75,7 +72,6 @@ class RolloutDataSet(Dataset):
     def reset(self):
         self.rollout = []
 
-
     def add_rollout(self, rollout):
         """Threadsafe method to add rollouts to the dataset"""
         global tb_step
@@ -136,14 +132,62 @@ def downsample(observation):
     greyscale = cv2.resize(greyscale, downsample_image_size, cv2.INTER_LINEAR)
     return greyscale
 
+
+class GymWorker(threading.Thread):
+    def __init__(self, threadID, name, counter, env, experience_buffer, rollouts, initial_action,
+                 policy, features, device, preprocessor=None):
+        threading.Thread.__init__(self)
+        self.threadID = threadID
+        self.name = name
+        self.counter = counter
+        self.env = env
+        self.rollouts = rollouts
+        self.buffer = []
+        self.experience_buffer = experience_buffer
+        self.pre_process = self.dummy_pre_process if preprocessor is None else preprocessor
+        self.default_action = initial_action
+        self.policy = policy.eval()
+        self.features = features
+        self.device = device
+
+    def dummy_pre_process(self, observation):
+        return observation
+
+    def run(self):
+        for i in range(self.rollouts):
+            observation_t0 = self.env.reset()
+            observation_t0 = self.pre_process(observation_t0)
+            observation_t1, reward, done, info = self.env.step(self.default_action)
+            observation_t1 = self.pre_process(observation_t1)
+            observation = observation_t1 - observation_t0
+            observation_t0 = observation_t1
+            done = False
+            while not done:
+                obs_t = to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1, self.features).to(self.device)
+                action_prob = self.policy(obs_t)
+                action = 2 if np.random.uniform() < action_prob.item() else 3
+                observation_t1, reward, done, info = self.env.step(action)
+
+                # save here
+                self.buffer.append((observation, action, reward, done, info))
+
+                # next frame
+                observation_t1 = self.pre_process(observation_t1)
+                observation = observation_t1 - observation_t0
+                observation_t0 = observation_t1
+
+            self.experience_buffer.add_rollout(self.buffer)
+            self.buffer = []
+
+
 @timeit
-def collect_rollouts(policy_net, envs, features):
+def collect_rollouts(policy_net, envs, features, num_threads, num_rollouts):
     rollout = RolloutDataSet(discount_factor=0.99)
     threads = []
     policy_net = policy_net.to(torch.device('cpu'))
     # Create new threads
     for id in range(num_threads):
-        threads.append(GymWorker(id, f"Thread-{id}", id, envs[id], rollout, rollouts=5, initial_action=2,
+        threads.append(GymWorker(id, f"Thread-{id}", id, envs[id], rollout, rollouts=num_rollouts, initial_action=2,
                                  policy=policy_net, features=features, device=torch.device('cpu'),
                                  preprocessor=downsample))
     # Start new Threads
@@ -160,7 +204,7 @@ def collect_rollouts(policy_net, envs, features):
     return rollout
 
 @timeit
-def train(policy_net):
+def train(policy_net, rollout, device):
     policy_net = policy_net.train().to(device)
     rollout_loader = DataLoader(rollout, batch_size=len(rollout))
     for i, (observation, reward, action, value, done) in enumerate(rollout_loader):
@@ -189,8 +233,8 @@ if __name__ == '__main__':
     resume = False
     save = True
     view_games = False
-    num_threads = 2
-    rollouts_per_thread = 6
+    num_threads = 10
+    rollouts_per_thread = 1
     envs = []
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
@@ -205,7 +249,7 @@ if __name__ == '__main__':
     #optim = torch.optim.Adam(lr=1e-3, params=policy_net.parameters())
     optim = torch.optim.RMSprop(lr=1e-3, params=policy_net.parameters())
 
-
     for epoch in range(num_epochs):
-        rollout = collect_rollouts(policy_net, envs, features)
-        train(policy_net)
+        rollout = collect_rollouts(policy_net, envs, features, num_threads, rollouts_per_thread)
+        print(f'collected {len(rollout)} frames')
+        train(policy_net, rollout, device)
