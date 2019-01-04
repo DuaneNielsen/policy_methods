@@ -8,14 +8,14 @@ import statistics
 from torchvision.transforms.functional import to_tensor
 import numpy as np
 import threading
-from storm.vis.hooks import hooks
-from storm.vis import GUIProgressMeter, TB
 from tensorboardX import SummaryWriter
+import random
 
 max_rollout_len = 3000
 downsample_image_size = (100, 80)
 features = downsample_image_size[0] * downsample_image_size[1]
-tb = SummaryWriter(f'runs/adamlr_1e3_nobatch_2')
+default_action = 2
+tb = SummaryWriter(f'runs/rmsprop_{random.randint(0,100)}')
 tb_step = 0
 num_epochs = 600
 num_rollouts = 10
@@ -26,7 +26,7 @@ view_games = False
 
 env = gym.make('Pong-v0')
 v = UniImageViewer('pong', (200, 160))
-GUIProgressMeter('training_pong')
+#GUIProgressMeter('training_pong')
 
 
 class PolicyNet(nn.Module):
@@ -104,43 +104,44 @@ def reset():
     # take a random action after reset to get 2 frames for our delta calc
     observation_t0 = env.reset()
     observation_t0 = downsample(observation_t0)
-    action = 2 if np.random.uniform() < 0.5 else 3
+    action = default_action
     observation_t1, reward, done, info = env.step(action)
     observation_t1 = downsample(observation_t1)
     observation = observation_t1 - observation_t0
     observation_t0 = observation_t1
-    return observation, observation_t0, action
+    return observation, observation_t0
 
 
 policy_net = PolicyNet(features)
 if resume:
     policy_net.load_state_dict(torch.load('vanilla.wgt'))
 
-optim = torch.optim.Adam(lr=1e-3, params=policy_net.parameters())
-#optim = torch.optim.RMSprop(lr=1e-3, params=policy_net.parameters())
+#optim = torch.optim.Adam(lr=1e-3, params=policy_net.parameters())
+optim = torch.optim.RMSprop(lr=1e-3, params=policy_net.parameters())
 #optim = torch.optim.SGD(lr=3e3, params=policy_net.parameters())
 
 for epoch in range(num_epochs):
     policy_net = policy_net.eval()
     rollout = RolloutDataSet(discount_factor=0.99)
-    observation, observation_t0, action = reset()
+    observation, observation_t0 = reset()
     reward_total = 0
     game_length = 0
     gl = []
 
     while collected_rollouts < num_rollouts:
-        # prev frame
+        # take an action on current observation and record result
+        observation_tensor = to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1, features)
+        action_prob = policy_net(observation_tensor)
+        action = 2 if np.random.uniform() < action_prob.item() else 3
         observation_t1, reward, done, info = env.step(action)
         reward_total += reward
-        observation_t1 = downsample(observation_t1)
+
         rollout.append(observation, reward, action, done)
 
-        # next frame
+        # compute the observation that resulted from our action
+        observation_t1 = downsample(observation_t1)
         observation = observation_t1 - observation_t0
         observation_t0 = observation_t1
-
-        action_prob = policy_net(to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1, features))
-        action = 2 if np.random.uniform() < action_prob.item() else 3
 
         if reward == 0:
             game_length += 1
@@ -149,9 +150,9 @@ for epoch in range(num_epochs):
             game_length = 0
 
         if done:
-            observation, observation_t0, action = reset()
+            observation, observation_t0 = reset()
             collected_rollouts += 1
-            hooks.execute_test_end(collected_rollouts, num_rollouts, reward_total)
+            #hooks.execute_test_end(collected_rollouts, num_rollouts, reward_total)
             tb.add_scalar('reward', reward_total, tb_step)
             tb.add_scalar('ave_game_len', statistics.mean(gl), tb_step)
             gl = []
@@ -163,7 +164,7 @@ for epoch in range(num_epochs):
             env.render(mode='human')
 
     if epoch % 20 == 0:
-        torch.save(policy_net.state_dict(), 'vanilla.wgt')
+        torch.save(policy_net.state_dict(), 'vanilla_single.wgt')
 
     collected_rollouts = 0
 
@@ -178,11 +179,11 @@ for epoch in range(num_epochs):
         action[action == 3] = 0.0
         optim.zero_grad()
         action_prob = policy_net(observation.squeeze().view(-1, features)).squeeze()
-        prob_action_taken = action * action_prob + (1.0 - action) * (1.0 - action_prob)
+        prob_action_taken = action * torch.log(action_prob + 1e-12) + (1.0 - action) * torch.log((1.0 - action_prob + 1e-12))
         loss = - value * prob_action_taken
         loss = loss.sum()
         loss.backward()
         optim.step()
-        hooks.execute_train_end(i, len(rollout_loader), loss.item())
+        #hooks.execute_train_end(i, len(rollout_loader), loss.item())
 
-    hooks.execute_epoch_end(epoch, num_epochs)
+    #hooks.execute_epoch_end(epoch, num_epochs)
