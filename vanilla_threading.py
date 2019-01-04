@@ -215,7 +215,7 @@ def train(policy_net, rollout, device):
         action[action == 3] = 0.0
         optim.zero_grad()
         action_prob = policy_net(observation.squeeze().view(-1, features)).squeeze()
-        prob_action_taken = action * torch.log(action_prob + 1e-12) + (1 - action) * (torch.log(1 - action_prob))
+        prob_action_taken = action * torch.log(action_prob + 1e-12) + (1 - action) * (torch.log(1 - action_prob + 1e-12))
         loss = - value * prob_action_taken
         loss = loss.sum()
         loss.backward()
