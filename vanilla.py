@@ -10,23 +10,24 @@ import numpy as np
 import threading
 from tensorboardX import SummaryWriter
 import random
-
-max_rollout_len = 3000
-downsample_image_size = (100, 80)
-features = downsample_image_size[0] * downsample_image_size[1]
-default_action = 2
-tb = SummaryWriter(f'runs/rmsprop_{random.randint(0,100)}')
-tb_step = 0
-num_epochs = 600
-num_rollouts = 10
-collected_rollouts = 0
-resume = False
-view_games = False
+import time
 
 
-env = gym.make('Pong-v0')
-v = UniImageViewer('pong', (200, 160))
-#GUIProgressMeter('training_pong')
+def timeit(method):
+    def timed(*args, **kw):
+        ts = time.time()
+        result = method(*args, **kw)
+        te = time.time()
+        if 'log_time' in kw:
+            name = kw.get('log_name', method.__name__.upper())
+            kw['log_time'][name] = int((te - ts) * 1000)
+        else:
+            print('%r  %2.2f ms' % \
+                  (method.__name__, (te - ts) * 1000))
+            tb.add_scalar(method.__name__, (te-ts), global_step=tb_step)
+        return result
+
+    return timed
 
 
 class PolicyNet(nn.Module):
@@ -64,7 +65,6 @@ class RolloutDataSet(Dataset):
         self.rollout.append((observation, reward, action))
         if reward != 0.0:
             self.end_game()
-            print(f'game finished reward: {reward}', ' !!!!!' if reward == 1.0 else '')
 
     def end_game(self):
         values = []
@@ -100,90 +100,113 @@ def downsample(observation):
     return greyscale
 
 
-def reset():
-    # take a random action after reset to get 2 frames for our delta calc
-    observation_t0 = env.reset()
-    observation_t0 = downsample(observation_t0)
-    action = default_action
-    observation_t1, reward, done, info = env.step(action)
-    observation_t1 = downsample(observation_t1)
-    observation = observation_t1 - observation_t0
-    observation_t0 = observation_t1
-    return observation, observation_t0
-
-
-policy_net = PolicyNet(features)
-if resume:
-    policy_net.load_state_dict(torch.load('vanilla.wgt'))
-
-#optim = torch.optim.Adam(lr=1e-3, params=policy_net.parameters())
-optim = torch.optim.RMSprop(lr=1e-3, params=policy_net.parameters())
-#optim = torch.optim.SGD(lr=3e3, params=policy_net.parameters())
-
-for epoch in range(num_epochs):
-    policy_net = policy_net.eval()
-    rollout = RolloutDataSet(discount_factor=0.99)
-    observation, observation_t0 = reset()
+@timeit
+def rollout_policy(policy):
+    global tb_step, rundir
+    policy = policy.eval()
+    rollout_dataset = RolloutDataSet(discount_factor=0.99)
     reward_total = 0
-    game_length = 0
-    gl = []
 
-    while collected_rollouts < num_rollouts:
-        # take an action on current observation and record result
-        observation_tensor = to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1, features)
-        action_prob = policy_net(observation_tensor)
-        action = 2 if np.random.uniform() < action_prob.item() else 3
+    for i in range(num_rollouts):
+
+        game_length = 0
+        gl = []
+
+        observation_t0 = env.reset()
+        observation_t0 = downsample(observation_t0)
+        action = default_action
         observation_t1, reward, done, info = env.step(action)
-        reward_total += reward
-
-        rollout.append(observation, reward, action, done)
-
-        # compute the observation that resulted from our action
         observation_t1 = downsample(observation_t1)
         observation = observation_t1 - observation_t0
         observation_t0 = observation_t1
+        done = False
 
-        if reward == 0:
-            game_length += 1
-        else:
-            gl.append(game_length)
-            game_length = 0
+        while not done:
+            # take an action on current observation and record result
+            observation_tensor = to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1,
+                                                                                                            features)
+            action_prob = policy(observation_tensor)
+            action = 2 if np.random.uniform() < action_prob.item() else 3
+            observation_t1, reward, done, info = env.step(action)
+            reward_total += reward
 
-        if done:
-            observation, observation_t0 = reset()
-            collected_rollouts += 1
-            #hooks.execute_test_end(collected_rollouts, num_rollouts, reward_total)
-            tb.add_scalar('reward', reward_total, tb_step)
-            tb.add_scalar('ave_game_len', statistics.mean(gl), tb_step)
-            gl = []
-            reward_total = 0
-            tb_step += 1
+            rollout_dataset.append(observation, reward, action, done)
 
-        if collected_rollouts == 0 and epoch % 10 == 0 and view_games:
-            v.render(observation)
-            env.render(mode='human')
+            # compute the observation that resulted from our action
+            observation_t1 = downsample(observation_t1)
+            observation = observation_t1 - observation_t0
+            observation_t0 = observation_t1
+
+            if reward == 0:
+                game_length += 1
+            else:
+                gl.append(game_length)
+                game_length = 0
+
+            if i == 0 and epoch % 10 == 0 and view_games:
+                v.render(observation)
+                env.render(mode='human')
+
+        # hooks.execute_test_end(collected_rollouts, num_rollouts, reward_total)
+        tb.add_scalar('reward', reward_total, tb_step)
+        tb.add_scalar('ave_game_len', statistics.mean(gl), tb_step)
+        reward_total = 0
+        tb_step += 1
 
     if epoch % 20 == 0:
-        torch.save(policy_net.state_dict(), 'vanilla_single.wgt')
+        torch.save(policy.state_dict(), rundir + 'vanilla.wgt')
 
-    collected_rollouts = 0
+    rollout_dataset.normalize()
+    return rollout_dataset
 
-    policy_net = policy_net.train()
-    rollout.normalize()
-    rollout_loader = DataLoader(rollout, batch_size=len(rollout))
 
+@timeit
+def train_policy(policy, rollout_dataset, optim):
+    policy = policy.train()
+    rollout_loader = DataLoader(rollout_dataset, batch_size=len(rollout_dataset))
     for i, (observation, reward, action, value) in enumerate(rollout_loader):
         action = action.float()
         value = value.float()
         action[action == 2] = 1.0
         action[action == 3] = 0.0
         optim.zero_grad()
-        action_prob = policy_net(observation.squeeze().view(-1, features)).squeeze()
-        prob_action_taken = action * torch.log(action_prob + 1e-12) + (1.0 - action) * torch.log((1.0 - action_prob + 1e-12))
+        action_prob = policy(observation.squeeze().view(-1, features)).squeeze()
+        prob_action_taken = action * torch.log(action_prob + 1e-12) + (1.0 - action) * torch.log(
+            (1.0 - action_prob + 1e-12))
         loss = - value * prob_action_taken
         loss = loss.sum()
         loss.backward()
         optim.step()
-        #hooks.execute_train_end(i, len(rollout_loader), loss.item())
+        # hooks.execute_train_end(i, len(rollout_loader), loss.item())
 
-    #hooks.execute_epoch_end(epoch, num_epochs)
+
+if __name__ == '__main__':
+
+    max_rollout_len = 3000
+    downsample_image_size = (100, 80)
+    features = downsample_image_size[0] * downsample_image_size[1]
+    default_action = 2
+    rundir = f'runs/rmsprop_{random.randint(0,100)}'
+    tb = SummaryWriter(rundir)
+    tb_step = 0
+    num_epochs = 600
+    num_rollouts = 10
+    collected_rollouts = 0
+    resume = False
+    view_games = False
+
+    env = gym.make('Pong-v0')
+    v = UniImageViewer('pong', (200, 160))
+    # GUIProgressMeter('training_pong')
+    policy_net = PolicyNet(features)
+    if resume:
+        policy_net.load_state_dict(torch.load('vanilla.wgt'))
+
+    optim = torch.optim.RMSprop(lr=1e-3, params=policy_net.parameters())
+
+    for epoch in range(num_epochs):
+        rollout_dataset = rollout_policy(policy_net)
+        tb.add_scalar('collected_frames', len(rollout_dataset), tb_step)
+        train_policy(policy_net, rollout_dataset, optim)
+
+    # hooks.execute_epoch_end(epoch, num_epochs)

@@ -10,6 +10,7 @@ import threading
 from tensorboardX import SummaryWriter
 import cProfile
 import time
+import random
 
 
 def do_cprofile(func):
@@ -199,7 +200,7 @@ def collect_rollouts(policy_net, envs, features, num_threads, num_rollouts):
         t.join()
 
     if epoch % 20 == 0 and save:
-        torch.save(policy_net.state_dict(), 'vanilla.wgt')
+        torch.save(policy_net.state_dict(), rundir + 'vanilla.wgt')
     rollout.normalize()
     return rollout
 
@@ -227,7 +228,8 @@ if __name__ == '__main__':
     max_rollout_len = 3000
     downsample_image_size = (100, 80)
     features = downsample_image_size[0] * downsample_image_size[1]
-    tb = SummaryWriter(f'runs/rmsprop_1e3_nobatch_multi_10')
+    rundir = f'runs/rmsprop_1e3_{random.randint(0,1000)}'
+    tb = SummaryWriter(rundir)
     tb_step = 0
     num_epochs = 600
     resume = False
