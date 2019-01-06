@@ -11,6 +11,7 @@ import threading
 from tensorboardX import SummaryWriter
 import random
 import time
+import argparse
 
 
 def timeit(method):
@@ -37,10 +38,16 @@ class PolicyNet(nn.Module):
         self.bn1 = nn.BatchNorm1d(200)
         self.l2 = nn.Linear(200, 1)
         self.bn2 = nn.BatchNorm1d(1)
+        self.batchnorm = False
 
     def forward(self, observation):
-        hidden = torch.relu(self.l1(observation))
-        return torch.sigmoid(self.l2(hidden))
+        if self.batchnorm:
+            hidden = torch.relu(self.bn1(self.l1(observation)))
+            return torch.sigmoid(self.bn2(self.l2(hidden)))
+        else:
+            hidden = torch.relu(self.l1(observation))
+            return torch.sigmoid(self.l2(hidden))
+
 
 
 class RolloutDataSet(Dataset):
@@ -50,16 +57,13 @@ class RolloutDataSet(Dataset):
         self.value = []
         self.start = 0
         self.discount_factor = discount_factor
-        self.lock = threading.Lock()
 
     def reset(self):
         self.rollout = []
 
     def add_rollout(self, rollout):
-        self.lock.acquire()
         for observation, action, reward, done, info in rollout:
             self.append(observation, reward, action, done)
-        self.lock.release()
 
     def append(self, observation, reward, action, done):
         self.rollout.append((observation, reward, action))
@@ -86,9 +90,19 @@ class RolloutDataSet(Dataset):
 
     def __getitem__(self, item):
         observation, reward, action = self.rollout[item]
-        value = self.value[item]
+        try:
+            value = self.value[item]
+        except IndexError:
+            print(f'missing value at index {item} reward{reward}')
+            value = 0
+
         observation_t = to_tensor(np.expand_dims(observation, axis=2))
         return observation_t, reward, action, value
+
+        reward_t = torch.tensor([reward], dtype=torch.float32)
+        action_t = torch.tensor([action], dtype=torch.long)
+        value_t = torch.tensor([value], dtype=torch.float32)
+        return observation_t, reward_t, action_t, value_t
 
     def __len__(self):
         return len(self.rollout)
@@ -104,6 +118,7 @@ def downsample(observation):
 def rollout_policy(policy):
     global tb_step, rundir
     policy = policy.eval()
+    policy = policy.to(torch.device('cpu'))
     rollout_dataset = RolloutDataSet(discount_factor=0.99)
     reward_total = 0
 
@@ -161,26 +176,41 @@ def rollout_policy(policy):
 
 
 @timeit
-def train_policy(policy, rollout_dataset, optim):
-    policy = policy.train()
-    rollout_loader = DataLoader(rollout_dataset, batch_size=len(rollout_dataset))
-    for i, (observation, reward, action, value) in enumerate(rollout_loader):
-        action = action.float()
-        value = value.float()
-        action[action == 2] = 1.0
-        action[action == 3] = 0.0
-        optim.zero_grad()
-        action_prob = policy(observation.squeeze().view(-1, features)).squeeze()
-        prob_action_taken = action * torch.log(action_prob + 1e-12) + (1.0 - action) * torch.log(
-            (1.0 - action_prob + 1e-12))
-        loss = - value * prob_action_taken
-        loss = loss.sum()
-        loss.backward()
-        optim.step()
-        # hooks.execute_train_end(i, len(rollout_loader), loss.item())
+def train_policy(policy, rollout_dataset, optim, device, batch_size, num_workers):
+
+        policy = policy.train()
+        policy = policy.to(torch.device(device))
+        pin_memory = False if device is 'cpu' else True
+        batch_size = batch_size if batch_size != 0 else len(rollout_dataset)
+
+        rollout_loader = DataLoader(rollout_dataset, batch_size=batch_size, pin_memory=pin_memory, num_workers=num_workers)
+        for i, (observation, reward, action, value) in enumerate(rollout_loader):
+            observation = observation.to(device)
+            action = action.to(device).float()
+            value = value.to(device).float()
+            action[action == 2] = 1.0
+            action[action == 3] = 0.0
+            optim.zero_grad()
+            action_prob = policy(observation.squeeze().view(-1, features)).squeeze()
+            prob_action_taken = action * torch.log(action_prob + 1e-12) + (1.0 - action) * torch.log(
+                (1.0 - action_prob + 1e-12))
+            loss = - value * prob_action_taken
+            loss = loss.sum()
+            loss.backward()
+            optim.step()
+            # hooks.execute_train_end(i, len(rollout_loader), loss.item())
 
 
 if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser('learn to play pong')
+    parser.add_argument('--reload')
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--batch_size', type=int, default=0)
+    parser.add_argument('--workers', type=int, default=0)
+    parser.add_argument('--batchnorm', dest='batchnorm', action='store_true')
+    parser.set_defaults(batchnorm=False)
+    args = parser.parse_args()
 
     max_rollout_len = 3000
     downsample_image_size = (100, 80)
@@ -192,21 +222,21 @@ if __name__ == '__main__':
     num_epochs = 600
     num_rollouts = 10
     collected_rollouts = 0
-    resume = False
     view_games = False
 
     env = gym.make('Pong-v0')
     v = UniImageViewer('pong', (200, 160))
     # GUIProgressMeter('training_pong')
     policy_net = PolicyNet(features)
-    if resume:
-        policy_net.load_state_dict(torch.load('vanilla_single.wgt'))
+    if args.reload:
+        policy_net.load_state_dict(torch.load(args.reload))
+    policy_net.batchnorm = args.batchnorm
 
     optim = torch.optim.RMSprop(lr=1e-3, params=policy_net.parameters())
 
     for epoch in range(num_epochs):
         rollout_dataset = rollout_policy(policy_net)
         tb.add_scalar('collected_frames', len(rollout_dataset), tb_step)
-        train_policy(policy_net, rollout_dataset, optim)
+        train_policy(policy_net, rollout_dataset, optim, args.device, args.batch_size, args.workers)
 
     # hooks.execute_epoch_end(epoch, num_epochs)

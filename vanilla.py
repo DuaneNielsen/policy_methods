@@ -154,7 +154,7 @@ def rollout_policy(policy):
         tb_step += 1
 
     if epoch % 20 == 0:
-        torch.save(policy.state_dict(), rundir + 'vanilla.wgt')
+        torch.save(policy.state_dict(), rundir + '/vanilla.wgt')
 
     rollout_dataset.normalize()
     return rollout_dataset
@@ -200,7 +200,7 @@ if __name__ == '__main__':
     # GUIProgressMeter('training_pong')
     policy_net = PolicyNet(features)
     if resume:
-        policy_net.load_state_dict(torch.load('vanilla.wgt'))
+        policy_net.load_state_dict(torch.load('vanilla_single.wgt'))
 
     optim = torch.optim.RMSprop(lr=1e-3, params=policy_net.parameters())
 
