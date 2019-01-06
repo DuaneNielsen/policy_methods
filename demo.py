@@ -17,7 +17,7 @@ def downsample(observation):
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser('learn to play pong')
-    parser.add_argument('--reload', default='runs/rmsprop_8vanilla.wgt')
+    parser.add_argument('--reload', default='rmsprop_8vanilla.wgt')
     parser.add_argument('--speed', type=float, default=0.02)
     args = parser.parse_args()
 

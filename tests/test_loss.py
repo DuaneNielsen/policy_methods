@@ -17,6 +17,8 @@ class TestLoss(TestCase):
 
         new_action_prob = policy(observation)
 
+        print(new_action_prob, action_prob)
+
         grad = new_action_prob - action_prob
 
         return grad
@@ -44,7 +46,12 @@ class TestLoss(TestCase):
 
         new_action_prob = policy(observation)
 
-        grad = new_action_prob - action_prob
+        new = torch.exp(new_action_prob)
+        old = torch.exp(action_prob)
+
+        print(new, old)
+
+        grad = new - old
 
         return grad
 
