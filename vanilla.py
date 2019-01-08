@@ -13,6 +13,7 @@ import random
 import time
 
 
+
 def timeit(method):
     def timed(*args, **kw):
         ts = time.time()
@@ -24,7 +25,8 @@ def timeit(method):
         else:
             print('%r  %2.2f ms' % \
                   (method.__name__, (te - ts) * 1000))
-            tb.add_scalar(method.__name__, (te-ts), global_step=tb_step)
+            if 'tb' in globals():
+                tb.add_scalar(method.__name__, (te - ts), global_step=tb_step)
         return result
 
     return timed
@@ -111,6 +113,7 @@ def rollout_policy(policy):
 
         game_length = 0
         gl = []
+        probs = []
 
         observation_t0 = env.reset()
         observation_t0 = downsample(observation_t0)
@@ -123,8 +126,8 @@ def rollout_policy(policy):
 
         while not done:
             # take an action on current observation and record result
-            observation_tensor = to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1,
-                                                                                                            features)
+            observation_tensor = to_tensor(np.expand_dims(observation, axis=2))\
+                .squeeze().unsqueeze(0).view(-1, policy.features)
             action_prob = policy(observation_tensor)
             action = 2 if np.random.uniform() < action_prob.item() else 3
             observation_t1, reward, done, info = env.step(action)
@@ -137,22 +140,32 @@ def rollout_policy(policy):
             observation = observation_t1 - observation_t0
             observation_t0 = observation_t1
 
+            # monitoring
             if reward == 0:
                 game_length += 1
+                probs.append(torch.exp(action_prob.squeeze()))
             else:
                 gl.append(game_length)
                 game_length = 0
 
-            if i == 0 and epoch % 10 == 0 and view_games:
+                probs = torch.stack(probs)
+                mean = probs.mean(dim=0)
+                print(mean[0].item(), mean[1].item())
+                del probs
+                probs = []
+
+            if view_games:
                 v.render(observation)
                 env.render(mode='human')
 
+        # more monitoring
         # hooks.execute_test_end(collected_rollouts, num_rollouts, reward_total)
         tb.add_scalar('reward', reward_total, tb_step)
         tb.add_scalar('ave_game_len', statistics.mean(gl), tb_step)
         reward_total = 0
         tb_step += 1
 
+    # save the file every so often
     if epoch % 20 == 0:
         torch.save(policy.state_dict(), rundir + '/vanilla.wgt')
 
@@ -189,8 +202,8 @@ if __name__ == '__main__':
     rundir = f'runs/rmsprop_{random.randint(0,100)}'
     tb = SummaryWriter(rundir)
     tb_step = 0
-    num_epochs = 600
-    num_rollouts = 10
+    num_epochs = 6000
+    num_rollouts = 1
     collected_rollouts = 0
     resume = False
     view_games = False
@@ -198,11 +211,12 @@ if __name__ == '__main__':
     env = gym.make('Pong-v0')
     v = UniImageViewer('pong', (200, 160))
     # GUIProgressMeter('training_pong')
-    policy_net = PolicyNet(features)
+    pong_action_map = [2, 3]
+    policy_net = MultiPolicyNet(features, pong_action_map)
     if resume:
         policy_net.load_state_dict(torch.load('vanilla_single.wgt'))
 
-    optim = torch.optim.RMSprop(lr=1e-3, params=policy_net.parameters())
+    optim = torch.optim.Adam(lr=1e-3, params=policy_net.parameters())
 
     for epoch in range(num_epochs):
         rollout_dataset = rollout_policy(policy_net)
