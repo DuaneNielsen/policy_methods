@@ -7,7 +7,7 @@ Deletes all folders with small tensorboard run files
 """
 
 parser = ArgumentParser('delete small runs')
-parser.add_argument('--minsize', type=int, default=5000)
+parser.add_argument('--minsize', type=int, default=10000)
 args = parser.parse_args()
 
 files = list(Path('runs').glob('*/events*.*'))
@@ -24,4 +24,7 @@ for file in files:
 for parent, file in rundirs.items():
     print(file.parent, file.name, file.stat().st_size)
     if file.stat().st_size < args.minsize:
-        shutil.rmtree(str(file.parent))
+        try:
+            shutil.rmtree(str(file.parent))
+        except:
+            print(f"OS didn't let us delete {str(file.parent)}")

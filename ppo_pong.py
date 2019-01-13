@@ -11,7 +11,7 @@ import threading
 from tensorboardX import SummaryWriter
 import random
 import time
-
+import argparse
 
 
 def timeit(method):
@@ -25,24 +25,38 @@ def timeit(method):
         else:
             print('%r  %2.2f ms' % \
                   (method.__name__, (te - ts) * 1000))
-            if 'tb' in globals():
-                tb.add_scalar(method.__name__, (te - ts), global_step=tb_step)
+            tb.add_scalar(method.__name__, (te-ts), global_step=tb_step)
         return result
 
     return timed
+
+
+class PPOWrap(nn.Module):
+    def __init__(self, old, new):
+        super().__init__()
+        self.old = old
+        self.new = new
+
+    def forward(self, input, old=False):
+        if old:
+            return self.old(input)
+        else:
+            return self.new(input)
+
+    def backup(self):
+        self.old.load_state_dict(self.new.state_dict())
 
 
 class PolicyNet(nn.Module):
     def __init__(self, features):
         super().__init__()
         self.l1 = nn.Linear(features, 200)
-        self.bn1 = nn.BatchNorm1d(200)
         self.l2 = nn.Linear(200, 1)
-        self.bn2 = nn.BatchNorm1d(1)
 
-    def forward(self, observation):
-        hidden = torch.relu(self.l1(observation))
-        return torch.sigmoid(self.l2(hidden))
+    def forward(self, observation, old=False):
+        hidden = torch.tanh(self.l1(observation))
+        hidden = self.l2(hidden)
+        return torch.sigmoid(hidden)
 
 
 class RolloutDataSet(Dataset):
@@ -52,16 +66,13 @@ class RolloutDataSet(Dataset):
         self.value = []
         self.start = 0
         self.discount_factor = discount_factor
-        self.lock = threading.Lock()
 
     def reset(self):
         self.rollout = []
 
     def add_rollout(self, rollout):
-        self.lock.acquire()
         for observation, action, reward, done, info in rollout:
             self.append(observation, reward, action, done)
-        self.lock.release()
 
     def append(self, observation, reward, action, done):
         self.rollout.append((observation, reward, action))
@@ -88,9 +99,19 @@ class RolloutDataSet(Dataset):
 
     def __getitem__(self, item):
         observation, reward, action = self.rollout[item]
-        value = self.value[item]
+        try:
+            value = self.value[item]
+        except IndexError:
+            print(f'missing value at index {item} reward{reward}')
+            value = 0
+
         observation_t = to_tensor(np.expand_dims(observation, axis=2))
         return observation_t, reward, action, value
+
+        reward_t = torch.tensor([reward], dtype=torch.float32)
+        action_t = torch.tensor([action], dtype=torch.long)
+        value_t = torch.tensor([value], dtype=torch.float32)
+        return observation_t, reward_t, action_t, value_t
 
     def __len__(self):
         return len(self.rollout)
@@ -106,6 +127,7 @@ def downsample(observation):
 def rollout_policy(policy):
     global tb_step, rundir
     policy = policy.eval()
+    policy = policy.to(torch.device('cpu'))
     rollout_dataset = RolloutDataSet(discount_factor=0.99)
     reward_total = 0
 
@@ -113,7 +135,6 @@ def rollout_policy(policy):
 
         game_length = 0
         gl = []
-        probs = []
 
         observation_t0 = env.reset()
         observation_t0 = downsample(observation_t0)
@@ -126,8 +147,8 @@ def rollout_policy(policy):
 
         while not done:
             # take an action on current observation and record result
-            observation_tensor = to_tensor(np.expand_dims(observation, axis=2))\
-                .squeeze().unsqueeze(0).view(-1, policy.features)
+            observation_tensor = to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1,
+                                                                                                            features)
             action_prob = policy(observation_tensor)
             action = 2 if np.random.uniform() < action_prob.item() else 3
             observation_t1, reward, done, info = env.step(action)
@@ -140,32 +161,22 @@ def rollout_policy(policy):
             observation = observation_t1 - observation_t0
             observation_t0 = observation_t1
 
-            # monitoring
             if reward == 0:
                 game_length += 1
-                probs.append(torch.exp(action_prob.squeeze()))
             else:
                 gl.append(game_length)
                 game_length = 0
 
-                probs = torch.stack(probs)
-                mean = probs.mean(dim=0)
-                print(mean[0].item(), mean[1].item())
-                del probs
-                probs = []
-
-            if view_games:
+            if i == 0 and epoch % 10 == 0 and view_games:
                 v.render(observation)
                 env.render(mode='human')
 
-        # more monitoring
         # hooks.execute_test_end(collected_rollouts, num_rollouts, reward_total)
         tb.add_scalar('reward', reward_total, tb_step)
         tb.add_scalar('ave_game_len', statistics.mean(gl), tb_step)
         reward_total = 0
         tb_step += 1
 
-    # save the file every so often
     if epoch % 20 == 0:
         torch.save(policy.state_dict(), rundir + '/vanilla.wgt')
 
@@ -173,85 +184,108 @@ def rollout_policy(policy):
     return rollout_dataset
 
 
-def probs(action_logprob, action_taken):
-    return torch.exp(action_logprob[action_taken])
-
-
-def ppo_loss(newprob, oldprob, advantage, clip=0.2):
-    ratio = (newprob) / (oldprob)
-
-    clipped_ratio = ratio.clamp(1.0 - clip, 1.0 + clip)
-    clipped_step = clipped_ratio * advantage
-    full_step = ratio * advantage
-    min_step = torch.stack((full_step, clipped_step), dim=1)
-    min_step, clipped = torch.min(min_step, dim=1)
-
-    #print(f'ACT__ {action[101:110].data}')
-    #print(f'ACT__ {action[0].data}')
-    print(f'ADVTG {advantage[0].data}')
-    print(f'CHNGE {(newprob[0] - oldprob[0]).data}')
-    print(f'NEW_P {newprob[0].data}')
-    print(f'OLD_P {oldprob[0].data}')
-    print(f'RATIO {ratio[0].data}')
-    print(f'CLIP_ {clipped_step[0].data}')
-    #print(f'NEW_G {newprob_t.grad.data.item()}')
-
-    return min_step.mean()
-
-    # min_step *= -1.0
-    #min_step.mean().backward()
-    # torch.nn.utils.clip_grad_norm_(policy.parameters(), 40)
-    #optim.step()
-
-
 @timeit
-def train_policy(policy, rollout_dataset, optim):
-    policy = policy.train()
-    rollout_loader = DataLoader(rollout_dataset, batch_size=len(rollout_dataset))
-    for i, (observation, reward, action, value) in enumerate(rollout_loader):
-        action = action.float()
-        value = value.float()
-        action[action == 2] = 1.0
-        action[action == 3] = 0.0
-        optim.zero_grad()
-        action_prob = policy(observation.squeeze().view(-1, features)).squeeze()
-        prob_action_taken = action * torch.log(action_prob + 1e-12) + (1.0 - action) * torch.log(
-            (1.0 - action_prob + 1e-12))
-        loss = - value * prob_action_taken
-        loss = loss.sum()
-        loss.backward()
-        optim.step()
-        # hooks.execute_train_end(i, len(rollout_loader), loss.item())
+def train_policy(policy, rollout_dataset, optim, device, batch_size, num_workers, clip):
+
+    policy = policy.to(torch.device(device))
+
+    batch_size = batch_size if batch_size != 0 else len(rollout_dataset)
+
+    rollout_loader = DataLoader(rollout_dataset, batch_size=batch_size)
+
+    for i, (observation, reward, action, advantage) in enumerate(rollout_loader):
+        for epoch in range(10):
+            observation = observation.to(device)
+            action = action.to(device).float()
+            advantage = advantage.to(device).float()
+            action[action == 2] = 1.0
+            action[action == 3] = 0.0
+
+            #prob = policy(observation.squeeze().view(-1, features)).squeeze()
+            #nll_loss = action * torch.log(prob + 1e-12) + (1.0 - action) * torch.log(
+            #    (1.0 - prob + 1e-12))
+
+            optim.zero_grad()
+
+            # compute the probability of the sample given the networks output
+            # the probability represents the chance of taking action 2, RIGHT
+            newprob_out = policy(observation.squeeze().view(-1, features)).squeeze()
+            newprob_out.retain_grad()
+            newprob = action * newprob_out + (1.0 - action) * (1.0 - newprob_out)
+
+            oldprob = policy(observation.squeeze().view(-1, features), old=True).squeeze()
+            oldprob = action * oldprob + (1.0 - action) * (1.0 - oldprob)
+
+            policy.backup()
+
+            # compute the surrogate gradient
+            ratio = (newprob + 1e-14) / (oldprob + 1e-14)
+
+            clipped_ratio = ratio.clamp(1.0 - clip, 1.0 + clip)
+            clipped_step = clipped_ratio * advantage
+            full_step = ratio * advantage
+            min_step = torch.stack((full_step, clipped_step), dim=1)
+            min_step, clipped = torch.min(min_step, dim=1)
+
+            min_step *= -1.0
+            min_step.mean().backward()
+            #torch.nn.utils.clip_grad_norm_(policy.parameters(), 40)
+            optim.step()
+
+            updated_prob = policy(observation.squeeze().view(-1, features)).squeeze()
+
+            print(f'ACT__ {action[101:110].data}')
+            print(f'ADVTG {advantage[101:110].data}')
+            print(f'CHNGE {(updated_prob - newprob)[101:110].data}')
+            print(f'OLD__ {oldprob[101:110].data}')
+            print(f'NEW__ {newprob[101:110].data}')
+            print(f'RATIO {ratio[101:110].data}')
+            print(f'GRAD_ {newprob_out.grad[101:110].data}')
+            #print(f'FSTEP {full_step[101:110].data}')
+            #print(f'MSTEP {min_step[101:110].data}')
+            #print(f'CLAMP {clipped[101:110].data}')
+
+            #pass
+            #return ratio, advantage, newprob, updated_prob, clipped
 
 
 if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser('learn to play pong')
+    parser.add_argument('--reload')
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--batch_size', type=int, default=0)
+    parser.add_argument('--workers', type=int, default=0)
+    parser.add_argument('--clip', type=float, default=0.2)
+    parser.add_argument('--batchnorm', dest='batchnorm', action='store_true')
+    parser.set_defaults(batchnorm=False)
+    args = parser.parse_args()
 
     max_rollout_len = 3000
     downsample_image_size = (100, 80)
     features = downsample_image_size[0] * downsample_image_size[1]
     default_action = 2
-    rundir = f'runs/rmsprop_{random.randint(0,100)}'
+    rundir = f'runs/ppo_{random.randint(0,1000)}'
     tb = SummaryWriter(rundir)
     tb_step = 0
-    num_epochs = 6000
-    num_rollouts = 1
+    num_epochs = 600
+    num_rollouts = 10
     collected_rollouts = 0
-    resume = False
     view_games = False
 
     env = gym.make('Pong-v0')
     v = UniImageViewer('pong', (200, 160))
     # GUIProgressMeter('training_pong')
-    pong_action_map = [2, 3]
-    policy_net = PPOWrap(MultiPolicyNet(features, pong_action_map), MultiPolicyNet(features, pong_action_map))
-    if resume:
-        policy_net.load_state_dict(torch.load('vanilla_single.wgt'))
+    policy_net = PPOWrap(PolicyNet(features), PolicyNet(features))
+    if args.reload:
+        policy_net.load_state_dict(torch.load(args.reload))
+    policy_net.batchnorm = args.batchnorm
 
-    optim = torch.optim.Adam(lr=1e-3, params=policy_net.parameters())
+    optim = torch.optim.Adam(lr=1e-4, params=policy_net.new.parameters())
 
     for epoch in range(num_epochs):
         rollout_dataset = rollout_policy(policy_net)
         tb.add_scalar('collected_frames', len(rollout_dataset), tb_step)
-        train_policy(policy_net, rollout_dataset, optim)
+        train_policy(policy_net, rollout_dataset, optim, args.device, args.batch_size, args.workers, args.clip)
 
     # hooks.execute_epoch_end(epoch, num_epochs)

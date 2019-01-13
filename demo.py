@@ -9,6 +9,7 @@ from torchvision.transforms.functional import to_tensor
 import numpy as np
 import time
 
+
 def downsample(observation):
     greyscale = cv2.cvtColor(observation, cv2.COLOR_BGR2GRAY)
     greyscale = cv2.resize(greyscale, downsample_image_size, cv2.INTER_LINEAR)
