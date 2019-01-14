@@ -173,12 +173,9 @@ def rollout_policy(policy):
     return rollout_dataset
 
 
-def probs(action_logprob, action_taken):
-    return torch.exp(action_logprob[action_taken])
-
-
 def ppo_loss(newprob, oldprob, advantage, clip=0.2):
-    ratio = (newprob) / (oldprob)
+
+    ratio = newprob / oldprob
 
     clipped_ratio = ratio.clamp(1.0 - clip, 1.0 + clip)
     clipped_step = clipped_ratio * advantage
@@ -186,22 +183,14 @@ def ppo_loss(newprob, oldprob, advantage, clip=0.2):
     min_step = torch.stack((full_step, clipped_step), dim=1)
     min_step, clipped = torch.min(min_step, dim=1)
 
-    #print(f'ACT__ {action[101:110].data}')
-    #print(f'ACT__ {action[0].data}')
     print(f'ADVTG {advantage[0].data}')
-    print(f'CHNGE {(newprob[0] - oldprob[0]).data}')
     print(f'NEW_P {newprob[0].data}')
     print(f'OLD_P {oldprob[0].data}')
     print(f'RATIO {ratio[0].data}')
     print(f'CLIP_ {clipped_step[0].data}')
-    #print(f'NEW_G {newprob_t.grad.data.item()}')
 
+    min_step *= -1
     return min_step.mean()
-
-    # min_step *= -1.0
-    #min_step.mean().backward()
-    # torch.nn.utils.clip_grad_norm_(policy.parameters(), 40)
-    #optim.step()
 
 
 @timeit
@@ -234,7 +223,7 @@ if __name__ == '__main__':
     tb = SummaryWriter(rundir)
     tb_step = 0
     num_epochs = 6000
-    num_rollouts = 1
+    num_rollouts = 10
     collected_rollouts = 0
     resume = False
     view_games = False
@@ -243,11 +232,11 @@ if __name__ == '__main__':
     v = UniImageViewer('pong', (200, 160))
     # GUIProgressMeter('training_pong')
     pong_action_map = [2, 3]
-    policy_net = PPOWrap(MultiPolicyNet(features, pong_action_map), MultiPolicyNet(features, pong_action_map))
+    policy_net = PPOWrap(features, pong_action_map)
     if resume:
         policy_net.load_state_dict(torch.load('vanilla_single.wgt'))
 
-    optim = torch.optim.Adam(lr=1e-3, params=policy_net.parameters())
+    optim = torch.optim.Adam(lr=1e-4, params=policy_net.new.parameters())
 
     for epoch in range(num_epochs):
         rollout_dataset = rollout_policy(policy_net)
