@@ -1,3 +1,8 @@
+from __future__ import print_function
+import os
+os.environ['CUDA_VISIBLE_DEVICES']='0'
+os.environ['GPU_DEBUG']='0'
+
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
@@ -106,6 +111,7 @@ def downsample(observation):
 def rollout_policy(policy):
     global tb_step, rundir
     policy = policy.eval()
+    policy = policy.to('cpu')
     rollout_dataset = RolloutDataSet(discount_factor=0.99)
     reward_total = 0
 
@@ -143,16 +149,18 @@ def rollout_policy(policy):
             # monitoring
             if reward == 0:
                 game_length += 1
-                probs.append(torch.exp(action_prob.squeeze()))
+                if debug:
+                    probs.append(torch.exp(action_prob.squeeze()))
             else:
                 gl.append(game_length)
                 game_length = 0
 
-                probs = torch.stack(probs)
-                mean = probs.mean(dim=0)
-                print(mean[0].item(), mean[1].item())
-                del probs
-                probs = []
+                if debug:
+                    probs = torch.stack(probs)
+                    mean = probs.mean(dim=0)
+                    print(mean[0].item(), mean[1].item())
+                    del probs
+                    probs = []
 
             if view_games:
                 v.render(observation)
@@ -183,37 +191,67 @@ def ppo_loss(newprob, oldprob, advantage, clip=0.2):
     min_step = torch.stack((full_step, clipped_step), dim=1)
     min_step, clipped = torch.min(min_step, dim=1)
 
-    print(f'ADVTG {advantage[0].data}')
-    print(f'NEW_P {newprob[0].data}')
-    print(f'OLD_P {oldprob[0].data}')
-    print(f'RATIO {ratio[0].data}')
-    print(f'CLIP_ {clipped_step[0].data}')
+    if debug:
+        print(f'ADVTG {advantage[0].data}')
+        print(f'NEW_P {newprob[0].data}')
+        print(f'OLD_P {oldprob[0].data}')
+        print(f'RATIO {ratio[0].data}')
+        print(f'CLIP_ {clipped_step[0].data}')
 
     min_step *= -1
     return min_step.mean()
 
 
 @timeit
-def train_policy(policy, rollout_dataset, optim):
+def train_policy(policy, rollout_dataset, optim, device='cpu'):
     policy = policy.train()
-    rollout_loader = DataLoader(rollout_dataset, batch_size=len(rollout_dataset))
-    for i, (observation, reward, action, value) in enumerate(rollout_loader):
-        action = action.float()
-        value = value.float()
-        action[action == 2] = 1.0
-        action[action == 3] = 0.0
-        optim.zero_grad()
-        action_prob = policy(observation.squeeze().view(-1, features)).squeeze()
-        prob_action_taken = action * torch.log(action_prob + 1e-12) + (1.0 - action) * torch.log(
-            (1.0 - action_prob + 1e-12))
-        loss = - value * prob_action_taken
-        loss = loss.sum()
-        loss.backward()
-        optim.step()
-        # hooks.execute_train_end(i, len(rollout_loader), loss.item())
+    policy = policy.to(device)
+
+    batches = math.floor(len(rollout_dataset) / max_minibatch_size) + 1
+    batch_size = math.floor(len(rollout_dataset) / batches)
+    steps_per_batch = math.floor(12 / batches) if math.floor(12/batches) > 0 else 1
+
+    rollout_loader = DataLoader(rollout_dataset, batch_size=batch_size, shuffle=True)
+    batches_p = 0
+    for i, (observation, reward, action, advantage) in enumerate(rollout_loader):
+        batches_p += 1
+        for step in range(steps_per_batch):
+
+            observation = observation.to(device)
+            advantage = advantage.float().to(device)
+            action = action.squeeze().to(device)
+            optim.zero_grad()
+
+            if debug:
+                print(f'ACT__ {action[0].data}')
+
+            new_logprob = policy(observation.squeeze().view(-1, policy.features)).squeeze()
+            new_prob = torch.exp(torch.distributions.Categorical(logits=new_logprob).log_prob(action))
+            new_logprob.retain_grad()
+            old_logprob = policy(observation.squeeze().view(-1, policy.features), old=True).squeeze()
+            old_prob = torch.exp(torch.distributions.Categorical(logits=old_logprob).log_prob(action))
+            policy.backup()
+
+            loss = ppo_loss(new_prob, old_prob, advantage, clip=0.2)
+            loss.backward()
+            optim.step()
+            updated_logprob = policy(observation.squeeze().view(-1, features)).squeeze()
+
+            if debug:
+                print(f'CHNGE {( torch.exp(updated_logprob) - torch.exp(new_logprob) ).data[0]}')
+                print(f'NEW_G {torch.exp(new_logprob.grad.data[0])}')
+
+            tb.add_scalar('memory_allocated', torch.cuda.memory_allocated(), tb_step)
+            tb.add_scalar('memory_cached', torch.cuda.memory_cached(), tb_step)
+    print(f'processed {batches_p} batches')
+    #gpu_profile(frame=sys._getframe(), event='line', arg=None)
 
 
 if __name__ == '__main__':
+
+    #from gpu_memory_profiling import gpu_profile
+    #import sys
+    #sys.settrace(gpu_profile)
 
     max_rollout_len = 3000
     downsample_image_size = (100, 80)
@@ -225,8 +263,11 @@ if __name__ == '__main__':
     num_epochs = 6000
     num_rollouts = 10
     collected_rollouts = 0
-    resume = False
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    max_minibatch_size = 40000
+    resume = True
     view_games = False
+    debug = False
 
     env = gym.make('Pong-v0')
     v = UniImageViewer('pong', (200, 160))
@@ -234,13 +275,15 @@ if __name__ == '__main__':
     pong_action_map = [2, 3]
     policy_net = PPOWrap(features, pong_action_map)
     if resume:
-        policy_net.load_state_dict(torch.load('vanilla_single.wgt'))
+        policy_net.load_state_dict(torch.load('runs/ppo_multilabel_259/vanilla.wgt'))
 
     optim = torch.optim.Adam(lr=1e-4, params=policy_net.new.parameters())
 
     for epoch in range(num_epochs):
         rollout_dataset = rollout_policy(policy_net)
         tb.add_scalar('collected_frames', len(rollout_dataset), tb_step)
-        train_policy(policy_net, rollout_dataset, optim)
+        train_policy(policy_net, rollout_dataset, optim, device)
+        torch.cuda.empty_cache()
+        #gpu_profile(frame=sys._getframe(), event='line', arg=None)
 
     # hooks.execute_epoch_end(epoch, num_epochs)

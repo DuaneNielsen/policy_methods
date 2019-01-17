@@ -1,5 +1,5 @@
 from unittest import TestCase
-from vanilla import PolicyNet, MultiPolicyNet, nll_value_loss, binary_value_loss, train_policy
+from ppo_clip_discrete import PolicyNet, MultiPolicyNet, nll_value_loss, binary_value_loss, train_policy
 import torch
 from torchvision.datasets import MNIST
 from torchvision.transforms import ToTensor

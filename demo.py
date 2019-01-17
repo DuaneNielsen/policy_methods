@@ -4,7 +4,7 @@ import gym
 from viewer import UniImageViewer
 import cv2
 from vanilla_pong import PolicyNet
-from vanilla import MultiPolicyNet
+from ppo_clip_discrete import MultiPolicyNet
 from ppo_pong import PPOWrap
 from ppo_pong import PolicyNet as PPOPolicyNet
 from torchvision.transforms.functional import to_tensor
@@ -21,12 +21,12 @@ def downsample(observation):
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser('learn to play pong')
-    parser.add_argument('--reload', default='rmsprop_8vanilla.wgt')
+    parser.add_argument('--reload', default='vanilla691.wgt')
     parser.add_argument('--speed', type=float, default=0.02)
     parser.add_argument('--multi', dest='multi', action='store_true')
     parser.add_argument('--ppo', dest='ppo', action='store_true')
     parser.add_argument('--list-actions', dest='list', action='store_true')
-    parser.set_defaults(multi=False, ppo=False)
+    parser.set_defaults(multi=False, ppo=True)
     args = parser.parse_args()
 
     downsample_image_size = (100, 80)

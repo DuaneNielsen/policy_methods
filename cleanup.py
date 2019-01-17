@@ -7,7 +7,7 @@ Deletes all folders with small tensorboard run files
 """
 
 parser = ArgumentParser('delete small runs')
-parser.add_argument('--minsize', type=int, default=10000)
+parser.add_argument('--minsize', type=int, default=18000)
 args = parser.parse_args()
 
 files = list(Path('runs').glob('*/events*.*'))
