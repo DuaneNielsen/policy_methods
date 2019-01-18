@@ -3,10 +3,10 @@ import argparse
 import gym
 from viewer import UniImageViewer
 import cv2
-from vanilla_pong import PolicyNet
+#from vanilla_pong import PolicyNet
 from ppo_clip_discrete import MultiPolicyNet
-from ppo_pong import PPOWrap
-from ppo_pong import PolicyNet as PPOPolicyNet
+import ppo_clip_discrete
+#from ppo_pong import PolicyNet as PPOPolicyNet
 from torchvision.transforms.functional import to_tensor
 import numpy as np
 import time
@@ -34,12 +34,18 @@ if __name__ == '__main__':
     default_action = 2
     num_rollouts = 10
 
-    if args.multi:
-        policy = MultiPolicyNet(features, [2, 3])
-    elif args.ppo:
-        policy = PPOWrap(PPOPolicyNet(features), PPOPolicyNet(features))
-    else:
-        policy = PolicyNet(features)
+    # if args.multi:
+    #     policy = MultiPolicyNet(features, [2, 3])
+    # elif args.ppo:
+    #     pong_action_map = [0, 2, 3]
+    #     policy = PPOWrap(features, pong_action_map)
+    # else:
+    #     policy = PolicyNet(features)
+
+    args.reload = r'runs\ppo_multilabel_752\vanilla.wgt'
+    pong_action_map = [0, 2, 3]
+    policy = ppo_clip_discrete.PPOWrap(features, pong_action_map)
+
 
     policy.load_state_dict(torch.load(args.reload))
     env = gym.make('Pong-v0')
@@ -66,13 +72,14 @@ if __name__ == '__main__':
         while not done:
             observation_tensor = to_tensor(np.expand_dims(observation, axis=2)).squeeze().unsqueeze(0).view(-1,
                                                                                                             features)
-            action_prob = policy(observation_tensor)
-            if action_prob > 0.9:
-                action = 2
-            elif action_prob < 0.1:
-                action = 3
-            else:
-                action = 0
+            action_logprob = policy(observation_tensor)
+            action = policy.new.max_action(action_logprob)
+            # if action_prob > 0.9:
+            #     action = 2
+            # elif action_prob < 0.1:
+            #     action = 3
+            # else
+            #     action = 0
 
             #action = 2 if np.random.uniform() < action_prob.item() else 3
             observation_t1, reward, done, info = env.step(action)

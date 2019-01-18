@@ -210,6 +210,7 @@ def train_policy(policy, rollout_dataset, optim, device='cpu'):
     batches = math.floor(len(rollout_dataset) / max_minibatch_size) + 1
     batch_size = math.floor(len(rollout_dataset) / batches)
     steps_per_batch = math.floor(12 / batches) if math.floor(12/batches) > 0 else 1
+    tb.add_scalar('batches', batches, tb_step)
 
     rollout_loader = DataLoader(rollout_dataset, batch_size=batch_size, shuffle=True)
     batches_p = 0
@@ -265,14 +266,14 @@ if __name__ == '__main__':
     collected_rollouts = 0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     max_minibatch_size = 40000
-    resume = True
+    resume = False
     view_games = False
     debug = False
 
     env = gym.make('Pong-v0')
     v = UniImageViewer('pong', (200, 160))
     # GUIProgressMeter('training_pong')
-    pong_action_map = [2, 3]
+    pong_action_map = [0, 2, 3]
     policy_net = PPOWrap(features, pong_action_map)
     if resume:
         policy_net.load_state_dict(torch.load('runs/ppo_multilabel_259/vanilla.wgt'))
